@@ -161,7 +161,12 @@ cufftPlan* cufftPlanCache::get_cufft_plan(const DomainPoint& size)
 }
 
 CUDALibraries::CUDALibraries()
-  : finalized_(false), cublas_(nullptr), cusolver_(nullptr), cutensor_(nullptr), plan_caches_()
+  : finalized_(false),
+    cublas_(nullptr),
+    cusolver_(nullptr),
+    cutensor_(nullptr),
+    cufile_(false),
+    plan_caches_()
 {
   CHECK_CUDA(cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking));
 }
@@ -174,6 +179,7 @@ void CUDALibraries::finalize()
   if (cublas_ != nullptr) finalize_cublas();
   if (cusolver_ != nullptr) finalize_cusolver();
   if (cutensor_ != nullptr) finalize_cutensor();
+  if (cufile_) finalize_cufile();
   for (auto& pair : plan_caches_) delete pair.second;
   cudaStreamDestroy(stream_);
   finalized_ = true;
@@ -195,6 +201,12 @@ void CUDALibraries::finalize_cutensor()
 {
   delete cutensor_;
   cutensor_ = nullptr;
+}
+
+void CUDALibraries::finalize_cufile()
+{
+  CHECK_CUFILE(cuFileDriverClose());
+  cufile_ = false;
 }
 
 cudaStream_t CUDALibraries::get_cached_stream() { return stream_; }
@@ -227,6 +239,13 @@ cutensorHandle_t* CUDALibraries::get_cutensor()
     CHECK_CUTENSOR(cutensorInit(cutensor_));
   }
   return cutensor_;
+}
+
+void CUDALibraries::init_cufile()
+{
+  if (cufile_) return;
+  CHECK_CUFILE(cuFileDriverOpen());
+  cufile_ = true;
 }
 
 cufftContext CUDALibraries::get_cufft_plan(cufftType type, const DomainPoint& size)
@@ -288,6 +307,13 @@ cutensorHandle_t* get_cutensor()
   return lib.get_cutensor();
 }
 
+void init_cufile()
+{
+  const auto proc = Processor::get_executing_processor();
+  auto& lib       = get_cuda_libraries(proc);
+  lib.init_cufile();
+}
+
 cufftContext get_cufft_plan(cufftType type, const Legion::DomainPoint& size)
 {
   const auto proc = Processor::get_executing_processor();
@@ -307,6 +333,7 @@ class LoadCUDALibsTask : public CuNumericTask<LoadCUDALibsTask> {
     lib.get_cublas();
     lib.get_cusolver();
     lib.get_cutensor();
+    lib.init_cufile();
   }
 };
 

@@ -13,6 +13,7 @@
 # limitations under the License.
 #
 
+import os
 import weakref
 from collections import Counter
 from collections.abc import Iterable
@@ -1603,3 +1604,14 @@ class DeferredArray(NumPyThunk):
             raise ValueError("invalid axis")
 
         sort(self, rhs, argsort, axis, stable)
+
+    def load(self, fname):
+        # TODO: Can't pack a string as a scalar at the moment
+        os.environ["CUNUMERIC_FNAME"] = fname
+        # TODO: Launching on only one processor currently; to load in parallel
+        # we will have to align spans on the file with subsets of the array.
+        lhs = self.base
+        task = self.context.create_task(CuNumericOpCode.LOAD)
+        task.add_output(lhs)
+        task.add_broadcast(lhs)
+        task.execute()

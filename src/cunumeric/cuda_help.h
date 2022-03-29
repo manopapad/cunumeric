@@ -23,6 +23,7 @@
 #include <cufft.h>
 #include <cufftXt.h>
 #include <cutensor.h>
+#include <cufile.h>
 #include <nccl.h>
 
 #define THREADS_PER_BLOCK 128
@@ -59,6 +60,12 @@
   do {                                              \
     cutensorStatus_t __result__ = (expr);           \
     check_cutensor(__result__, __FILE__, __LINE__); \
+  } while (false)
+
+#define CHECK_CUFILE(expr)                        \
+  do {                                            \
+    CUfileError_t __result__ = (expr);            \
+    check_cufile(__result__, __FILE__, __LINE__); \
   } while (false)
 
 #define CHECK_NCCL(expr)                    \
@@ -111,6 +118,7 @@ cudaStream_t get_cached_stream();
 cublasHandle_t get_cublas();
 cusolverDnHandle_t get_cusolver();
 cutensorHandle_t* get_cutensor();
+void init_cufile();
 cufftContext get_cufft_plan(cufftType type, const Legion::DomainPoint& size);
 
 __host__ inline void check_cuda(cudaError_t error, const char* file, int line)
@@ -168,6 +176,19 @@ __host__ inline void check_cutensor(cutensorStatus_t result, const char* file, i
     fprintf(stderr,
             "Internal Legate CUTENSOR failure with error %s (%d) in file %s at line %d\n",
             cutensorGetErrorString(result),
+            result,
+            file,
+            line);
+    exit(result);
+  }
+}
+
+__host__ inline void check_cufile(CUfileError_t result, const char* file, int line)
+{
+  if (result != CU_FILE_SUCCESS) {
+    fprintf(stderr,
+            "Internal Legate CUFILE failure with error %s (%d) in file %s at line %d\n",
+            CUFILE_ERRSTR(result),
             result,
             file,
             line);

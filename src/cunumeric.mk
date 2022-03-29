@@ -106,6 +106,7 @@ GEN_GPU_SRC += cunumeric/ternary/where.cu               \
 							 cunumeric/item/write.cu                  \
 							 cunumeric/index/choose.cu                \
 							 cunumeric/index/repeat.cu                \
+							 cunumeric/io/load.cu                     \
 							 cunumeric/matrix/contract.cu             \
 							 cunumeric/matrix/diag.cu                 \
 							 cunumeric/matrix/gemm.cu                 \

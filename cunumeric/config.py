@@ -92,6 +92,7 @@ class CuNumericOpCode(IntEnum):
     FILL = _cunumeric.CUNUMERIC_FILL
     FLIP = _cunumeric.CUNUMERIC_FLIP
     GEMM = _cunumeric.CUNUMERIC_GEMM
+    LOAD = _cunumeric.CUNUMERIC_LOAD
     LOAD_CUDALIBS = _cunumeric.CUNUMERIC_LOAD_CUDALIBS
     MATMUL = _cunumeric.CUNUMERIC_MATMUL
     MATVECMUL = _cunumeric.CUNUMERIC_MATVECMUL

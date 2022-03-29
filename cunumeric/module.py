@@ -4160,3 +4160,18 @@ def bincount(a, weights=None, minlength=0):
             )
             out._thunk.bincount(a._thunk, weights=weights._thunk)
     return out
+
+
+#####
+# I/O
+#####
+
+
+def load(fname, shape, dtype):
+    # TODO: only supporting 1d and doubles right now
+    assert len(shape) == 1
+    assert dtype == np.float64
+    # TODO: need to read the size and datatype from the actual file
+    result = empty(shape, dtype)
+    result._thunk.load(fname)
+    return result

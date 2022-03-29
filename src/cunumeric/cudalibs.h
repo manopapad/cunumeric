@@ -38,12 +38,14 @@ struct CUDALibraries {
   cublasHandle_t get_cublas();
   cusolverDnHandle_t get_cusolver();
   cutensorHandle_t* get_cutensor();
+  void init_cufile();
   cufftContext get_cufft_plan(cufftType type, const Legion::DomainPoint& size);
 
  private:
   void finalize_cublas();
   void finalize_cusolver();
   void finalize_cutensor();
+  void finalize_cufile();
 
  private:
   bool finalized_;
@@ -51,6 +53,7 @@ struct CUDALibraries {
   cublasContext* cublas_;
   cusolverDnContext* cusolver_;
   cutensorHandle_t* cutensor_;
+  bool cufile_;
   std::map<cufftType, cufftPlanCache*> plan_caches_;
 };
 
