@@ -17,7 +17,13 @@
 #include "cunumeric/io/load.h"
 #include "cunumeric/cuda_help.h"
 
+#include <fcntl.h>
+#include <unistd.h>
+
 namespace cunumeric {
+
+using namespace Legion;
+using namespace legate;
 
 /*static*/ void LoadTask::gpu_variant(TaskContext& context)
 {
@@ -27,7 +33,7 @@ namespace cunumeric {
   assert(fname != NULL);
   int fd = open(fname, O_RDONLY | O_DIRECT);
   if (fd < 0) {
-    std::cerr << "Error " << errno << " while opening " << fname << stdb::endl;
+    std::cerr << "Error " << errno << " while opening " << fname << std::endl;
     exit(-1);
   }
   CUfileDescr_t cf_descr;
@@ -36,15 +42,15 @@ namespace cunumeric {
   cf_descr.type      = CU_FILE_HANDLE_TYPE_OPAQUE_FD;
   CUfileHandle_t cf_handle;
   CHECK_CUFILE(cuFileHandleRegister(&cf_handle, &cf_descr));
-  const Array& out = context.outputs()[0];
+  const Array& out_arr = context.outputs()[0];
   // TODO: type and #dims should match actual array
-  Rect<1> rect              = out.shape<1>();
+  Rect<1> rect              = out_arr.shape<1>();
   size_t size               = (rect.hi[0] - rect.lo[0] + 1) * sizeof(double);
-  AccessorWO<double, 1> out = out.write_accessor<double, 1>(rect);
+  AccessorWO<double, 1> out = out_arr.write_accessor<double, 1>(rect);
   void* outptr              = out.ptr(rect);
   size_t bytes_read         = cuFileRead(cf_handle, outptr, size, 0, 0);
   assert(bytes_read == size);
-  CHECK_CUFILE(cuFileHandleDeregister(cf_handle));
+  cuFileHandleDeregister(cf_handle);
   close(fd);
 }
 

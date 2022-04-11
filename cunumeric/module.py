@@ -4282,11 +4282,11 @@ def bincount(a, weights=None, minlength=0):
 #####
 
 
-def load(fname, shape, dtype):
+def fromfile(fname, dtype, count):
+    # TODO: arguments are currently mandatory
     # TODO: only supporting 1d and doubles right now
-    assert len(shape) == 1
     assert dtype == np.float64
     # TODO: need to read the size and datatype from the actual file
-    result = empty(shape, dtype)
+    result = empty((count,), dtype)
     result._thunk.load(fname)
     return result

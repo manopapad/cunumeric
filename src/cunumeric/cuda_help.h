@@ -174,7 +174,7 @@ __host__ inline void check_cutensor(cutensorStatus_t result, const char* file, i
 {
   if (result != CUTENSOR_STATUS_SUCCESS) {
     fprintf(stderr,
-            "Internal Legate CUTENSOR failure with error %s (%d) in file %s at line %d\n",
+            "Internal CUTENSOR failure with error %s (%d) in file %s at line %d\n",
             cutensorGetErrorString(result),
             result,
             file,
@@ -185,14 +185,14 @@ __host__ inline void check_cutensor(cutensorStatus_t result, const char* file, i
 
 __host__ inline void check_cufile(CUfileError_t result, const char* file, int line)
 {
-  if (result != CU_FILE_SUCCESS) {
+  if (result.err != CU_FILE_SUCCESS) {
     fprintf(stderr,
-            "Internal Legate CUFILE failure with error %s (%d) in file %s at line %d\n",
-            CUFILE_ERRSTR(result),
-            result,
+            "Internal CUFILE failure with error %s (%d) in file %s at line %d\n",
+            CUFILE_ERRSTR(result.err),
+            result.err,
             file,
             line);
-    exit(result);
+    exit(result.err);
   }
 }
 
