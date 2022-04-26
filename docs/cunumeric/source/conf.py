@@ -103,6 +103,9 @@ nitpick_ignore = [
     ("py:class", "scalars"),
     ("py:class", "complex ndarray"),
     ("py:class", "sequence of ints"),
+    ("py:class", "backward"),
+    ("py:class", "ortho"),
+    ("py:class", "forward"),
     ("py:class", "array"),
 ]
 
