@@ -16,6 +16,7 @@
 import numpy as np
 from cunumeric._ufunc.math import sqrt as _sqrt
 from cunumeric.array import convert_to_cunumeric_ndarray
+from cunumeric.coverage import reuses_numpy
 from cunumeric.module import ndarray
 
 
@@ -71,6 +72,49 @@ def cholesky(a):
             "cuNumeric needs to support stacked 2d arrays"
         )
     return _cholesky(lg_array)
+
+
+@reuses_numpy
+def multi_dot(arrays, *, out=None):
+    """
+    Compute the dot product of two or more arrays in a single function call,
+    while automatically selecting the fastest evaluation order.
+
+    `multi_dot` chains :func:`cunumeric.dot` and uses optimal parenthesization
+    of the matrices. Depending on the shapes of the matrices, this can speed up
+    the multiplication a lot.
+
+    Think of `multi_dot` as:
+
+        def multi_dot(arrays): return functools.reduce(cunumeric.dot, arrays)
+
+    Parameters
+    ----------
+    arrays : sequence of array_like
+        If the first argument is 1-D it is treated as row vector.
+        If the last argument is 1-D it is treated as column vector.
+        The other arguments must be 2-D.
+    out : ndarray, optional
+        Output argument. This must have the exact same shape and dtype as what
+        would be returned if it was not present.
+
+    Returns
+    -------
+    output : ndarray
+        Returns the dot product of the supplied arrays.
+
+    See Also
+    --------
+    numpy.linalg.multi_dot
+
+    Availability
+    --------
+    Multiple GPUs, Multiple CPUs
+    """
+    arrays = [convert_to_cunumeric_ndarray(x) for x in arrays]
+    if out is not None:
+        out = convert_to_cunumeric_ndarray(out)
+    return np.linalg.multi_dot(arrays, out=out)
 
 
 def norm(x, ord=None, axis=None, keepdims=False):

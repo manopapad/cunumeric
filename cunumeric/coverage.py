@@ -62,6 +62,28 @@ def filter_namespace(
     }
 
 
+def reuses_numpy(func):
+    """
+    Declares that the decorated :class:`cunumeric.ndarray` or module-level
+    function reuses the corresponding NumPy implementation, but without
+    going through NumPy arrays.
+
+    This works because NumPy will route all API calls happening inside its
+    implementation through the ``__array_function__`` mechanism, which will
+    allow CuNumeric to swap in its implementations for those APIs, that can
+    operate on :class:`cunumeric.ndarray`s directly.
+
+    A function ``cunumeric.foo`` that is decorated with this should convert all
+    array-like arguments to :class:`cunumeric.ndarray`s, and eventually call
+    ``numpy.foo``. This decorator marks ``cunumeric.foo`` such that when NumPy
+    asks :func:`cunumeric.ndarray.__array_function__` how to route the eventual
+    call to ``numpy.foo``, we tell it to use its native implementation rather
+    than enter ``cunumeric.foo`` recursively, thus avoiding an infinite loop.
+    """
+    func._reuses_numpy = True
+    return func
+
+
 class AnyCallable(Protocol):
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         ...
@@ -70,6 +92,7 @@ class AnyCallable(Protocol):
 @dataclass(frozen=True)
 class CuWrapperMetadata:
     implemented: bool
+    reuses_numpy: bool
 
 
 class CuWrapped(AnyCallable, Protocol):
@@ -97,7 +120,9 @@ def implemented(func: AnyCallable, prefix: str, name: str) -> CuWrapped:
         def wrapper(*args: Any, **kwargs: Any) -> Any:
             return func(*args, **kwargs)
 
-    wrapper._cunumeric = CuWrapperMetadata(implemented=True)
+    wrapper._cunumeric = CuWrapperMetadata(
+        implemented=True, reuses_numpy=getattr(func, "_reuses_numpy", False)
+    )
 
     return wrapper
 
@@ -129,7 +154,9 @@ def unimplemented(func: AnyCallable, prefix: str, name: str) -> CuWrapped:
             )
             return func(*args, **kwargs)
 
-    wrapper._cunumeric = CuWrapperMetadata(implemented=False)
+    wrapper._cunumeric = CuWrapperMetadata(
+        implemented=False, reuses_numpy=False
+    )
 
     return wrapper
 
