@@ -47,6 +47,7 @@ _UNARY_OPS = {
     UnaryOpCode.EXP: np.exp,
     UnaryOpCode.EXPM1: np.expm1,
     UnaryOpCode.FLOOR: np.floor,
+    UnaryOpCode.FREXP: np.frexp,
     UnaryOpCode.INVERT: np.invert,
     UnaryOpCode.ISFINITE: np.isfinite,
     UnaryOpCode.ISINF: np.isinf,
@@ -56,6 +57,7 @@ _UNARY_OPS = {
     UnaryOpCode.LOG2: np.log2,
     UnaryOpCode.LOG: np.log,
     UnaryOpCode.LOGICAL_NOT: np.logical_not,
+    UnaryOpCode.MODF: np.modf,
     UnaryOpCode.NEGATIVE: np.negative,
     UnaryOpCode.POSITIVE: np.positive,
     UnaryOpCode.RAD2DEG: np.rad2deg,
@@ -98,6 +100,7 @@ _BINARY_OPS = {
     BinaryOpCode.GREATER_EQUAL: np.greater_equal,
     BinaryOpCode.HYPOT: np.hypot,
     BinaryOpCode.LCM: np.lcm,
+    BinaryOpCode.LDEXP: np.ldexp,
     BinaryOpCode.LEFT_SHIFT: np.left_shift,
     BinaryOpCode.LESS: np.less,
     BinaryOpCode.LESS_EQUAL: np.less_equal,
@@ -267,7 +270,7 @@ class EagerArray(NumPyThunk):
 
     def real(self):
         if self.deferred is not None:
-            return self.deferred.imag()
+            return self.deferred.real()
         return EagerArray(self.runtime, self.array.real)
 
     def conj(self):
@@ -287,29 +290,30 @@ class EagerArray(NumPyThunk):
 
                 out.array = convolve(self.array, v.array, mode)
 
-    def fft(self, out, axes, kind, direction):
+    def fft(self, rhs, axes, kind, direction):
+        self.check_eager_args(rhs)
         if self.deferred is not None:
-            self.deferred.fft(out, axes, kind, direction)
+            self.deferred.fft(rhs, axes, kind, direction)
         else:
-            if isinstance(kind, FFT_D2Z) or isinstance(kind, FFT_R2C):
-                res = np.fft.rfftn(self.array, axes=axes, norm="backward")
-            elif isinstance(kind, FFT_Z2D) or isinstance(kind, FFT_C2R):
-                s = [self.array.shape[i] for i in axes]
-                res = np.fft.irfftn(self.array, s=s, axes=axes, norm="forward")
+            if kind in (FFT_D2Z, FFT_R2C):
+                res = np.fft.rfftn(rhs.array, axes=axes, norm="backward")
+            elif kind in (FFT_Z2D, FFT_C2R):
+                s = tuple(rhs.array.shape[i] for i in axes)
+                res = np.fft.irfftn(rhs.array, s=s, axes=axes, norm="forward")
             else:
                 if direction == FFTDirection.FORWARD:
-                    res = np.fft.fftn(self.array, axes=axes, norm="backward")
+                    res = np.fft.fftn(rhs.array, axes=axes, norm="backward")
                 else:
-                    res = np.fft.ifftn(self.array, axes=axes, norm="forward")
+                    res = np.fft.ifftn(rhs.array, axes=axes, norm="forward")
             if kind.is_single_precision:
                 if res.dtype == np.complex128:
-                    out.array[:] = res.astype(np.complex64)
+                    self.array[:] = res.astype(np.complex64)
                 elif res.dtype == np.float64:
-                    out.array[:] = res.astype(np.float32)
+                    self.array[:] = res.astype(np.float32)
                 else:
                     raise RuntimeError("Unsupported data type in eager FFT")
             else:
-                out.array[:] = res
+                self.array[:] = res
 
     def copy(self, rhs, deep=False):
         self.check_eager_args(rhs)
@@ -657,21 +661,34 @@ class EagerArray(NumPyThunk):
                     low, high, size=self.array.shape, dtype=self.array.dtype
                 )
 
-    def unary_op(self, op, rhs, where, args):
-        self.check_eager_args(rhs, where)
+    def unary_op(self, op, rhs, where, args, multiout=None):
+        if multiout is None:
+            self.check_eager_args(rhs, where)
+        else:
+            self.check_eager_args(rhs, where, *multiout)
+
         if self.deferred is not None:
-            self.deferred.unary_op(op, rhs, where, args)
+            self.deferred.unary_op(op, rhs, where, args, multiout=multiout)
             return
 
         if op in _UNARY_OPS:
             func = _UNARY_OPS[op]
-            func(
-                rhs.array,
-                out=self.array,
-                where=where
-                if not isinstance(where, EagerArray)
-                else where.array,
-            )
+            if multiout is None:
+                func(
+                    rhs.array,
+                    out=self.array,
+                    where=where
+                    if not isinstance(where, EagerArray)
+                    else where.array,
+                )
+            else:
+                func(
+                    rhs.array,
+                    out=(self.array, *(out.array for out in multiout)),
+                    where=where
+                    if not isinstance(where, EagerArray)
+                    else where.array,
+                )
         elif op == UnaryOpCode.CLIP:
             np.clip(rhs.array, out=self.array, a_min=args[0], a_max=args[1])
         elif op == UnaryOpCode.COPY:

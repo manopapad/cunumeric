@@ -606,6 +606,20 @@ class DeferredArray(NumPyThunk):
 
         return result
 
+    def _convert_future_to_store(self, a):
+        store = self.context.create_store(
+            a.dtype,
+            shape=a.shape,
+            optimize_scalar=False,
+        )
+        store_copy = DeferredArray(
+            self.runtime,
+            base=store,
+            dtype=a.dtype,
+        )
+        store_copy.copy(a, deep=True)
+        return store_copy
+
     def get_item(self, key):
         # Check to see if this is advanced indexing or not
         if is_advanced_indexing(key):
@@ -624,13 +638,32 @@ class DeferredArray(NumPyThunk):
                     self.dtype,
                     inputs=[self],
                 )
-                copy = self.context.create_copy()
+                if index_array.base.kind == Future:
+                    index_array = self._convert_future_to_store(index_array)
+                    result_store = self.context.create_store(
+                        self.dtype,
+                        shape=index_array.shape,
+                        optimize_scalar=False,
+                    )
+                    result = DeferredArray(
+                        self.runtime,
+                        base=result_store,
+                        dtype=self.dtype,
+                    )
 
+                else:
+                    result = self.runtime.create_empty_thunk(
+                        index_array.base.shape,
+                        self.dtype,
+                        inputs=[self],
+                    )
+                copy = self.context.create_copy()
+                copy.set_source_indirect_out_of_range(False)
                 copy.add_input(store)
                 copy.add_source_indirect(index_array.base)
                 copy.add_output(result.base)
-
                 copy.execute()
+
             else:
                 return index_array
 
@@ -673,6 +706,8 @@ class DeferredArray(NumPyThunk):
                 rhs = rhs.base
 
             copy = self.context.create_copy()
+            copy.set_target_indirect_out_of_range(False)
+
             copy.add_input(rhs)
             copy.add_target_indirect(index_array.base)
             copy.add_output(lhs.base)
@@ -1009,16 +1044,16 @@ class DeferredArray(NumPyThunk):
         task.execute()
 
     @auto_convert([1])
-    def fft(self, lhs, axes, kind, direction):
+    def fft(self, rhs, axes, kind, direction):
+        lhs = self
         # For now, deferred only supported with GPU, use eager / numpy for CPU
         if self.runtime.num_gpus == 0:
             lhs_eager = lhs.runtime.to_eager_array(lhs)
-            self.runtime.to_eager_array(self).fft(
-                lhs_eager, axes, kind, direction
-            )
+            rhs_eager = rhs.runtime.to_eager_array(rhs)
+            lhs_eager.fft(rhs_eager, axes, kind, direction)
             lhs.base = lhs.runtime.to_deferred_array(lhs_eager).base
         else:
-            input = self.base
+            input = rhs.base
             output = lhs.base
 
             task = self.context.create_task(CuNumericOpCode.FFT)
@@ -1033,7 +1068,7 @@ class DeferredArray(NumPyThunk):
                 len(set(axes)) != len(axes)
                 or len(axes) != input.ndim
                 or tuple(axes) != tuple(sorted(axes)),
-                ty.int8,
+                bool,
             )
             for ax in axes:
                 task.add_scalar_arg(ax, ty.int64)
@@ -1619,7 +1654,7 @@ class DeferredArray(NumPyThunk):
 
     # Perform the unary operation and put the result in the array
     @auto_convert([2])
-    def unary_op(self, op, src, where, args):
+    def unary_op(self, op, src, where, args, multiout=None):
         lhs = self.base
         rhs = src._broadcast(lhs.shape)
 
@@ -1630,6 +1665,11 @@ class DeferredArray(NumPyThunk):
         self.add_arguments(task, args)
 
         task.add_alignment(lhs, rhs)
+
+        if multiout is not None:
+            for out in multiout:
+                task.add_output(out.base)
+                task.add_alignment(out.base, rhs)
 
         task.execute()
 
