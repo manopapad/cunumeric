@@ -13,10 +13,25 @@
 # limitations under the License.
 #
 
-from .bit_twiddling import *
-from .comparison import *
-from .math import *
-from .matrix import *
-from .floating import *
-from .trigonometric import *
-from .ufunc import ufunc
+from cunumeric.module import matmul as matmul_modfun
+
+from .ufunc import float_dtypes, ufunc
+
+_MATMUL_DOCSTRING = """
+Matrix product of two arrays.
+
+Refer to :func:`cunumeric.matmul` for full documentation.
+
+See Also
+--------
+:func:`cunumeric.matmul` : equivalent function
+
+Availability
+--------
+Multiple GPUs, Multiple CPUs
+"""
+
+matmul = ufunc(
+    "matmul", _MATMUL_DOCSTRING, {(ty, ty): ty for ty in float_dtypes}
+)
+matmul.__call__ = matmul_modfun
