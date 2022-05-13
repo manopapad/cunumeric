@@ -113,7 +113,7 @@ def multi_dot(arrays, *, out=None):
     """
     arrays = [convert_to_cunumeric_ndarray(x) for x in arrays]
     if out is not None:
-        out = convert_to_cunumeric_ndarray(out)
+        out = convert_to_cunumeric_ndarray(out, share=True)
     return np.linalg.multi_dot(arrays, out=out)
 
 
