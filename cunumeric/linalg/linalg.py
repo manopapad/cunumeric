@@ -112,7 +112,8 @@ def multi_dot(arrays, *, out=None):
     arrays = [convert_to_cunumeric_ndarray(x) for x in arrays]
     if out is not None:
         out = convert_to_cunumeric_ndarray(out, share=True)
-    return np.linalg.multi_dot(arrays, out=out)
+    # Skip over __array_function__ dispatch, to avoid infinite recursion.
+    return np.linalg.multi_dot._implementation(arrays, out=out)
 
 
 def norm(x, ord=None, axis=None, keepdims=False):

@@ -245,6 +245,19 @@ class ndarray:
     # def __array_struct__(self):
     #    return self.__array__().__array_struct__
 
+    def __array_function__(self, func, types, args, kwargs):
+        import cunumeric as cn
+
+        module = reduce(getattr, func.__module__.split(".")[1:], cn)
+        cn_func = getattr(module, func.__name__)
+        return cn_func(*args, **kwargs)
+
+    def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
+        from . import _ufunc
+
+        cn_ufunc = getattr(_ufunc, ufunc.__name__)
+        return getattr(cn_ufunc, method)(*inputs, **kwargs)
+
     @property
     def T(self):
         """
