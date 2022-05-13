@@ -16,7 +16,6 @@
 import numpy as np
 from cunumeric._ufunc.math import sqrt as _sqrt
 from cunumeric.array import convert_to_cunumeric_ndarray
-from cunumeric.coverage import reuses_numpy
 from cunumeric.module import ndarray
 
 
@@ -74,7 +73,6 @@ def cholesky(a):
     return _cholesky(lg_array)
 
 
-@reuses_numpy
 def multi_dot(arrays, *, out=None):
     """
     Compute the dot product of two or more arrays in a single function call,
