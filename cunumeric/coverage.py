@@ -18,14 +18,14 @@ import warnings
 from dataclasses import dataclass
 from functools import wraps
 from types import FunctionType, MethodDescriptorType, MethodType, ModuleType
-from typing import Any, Callable, Container, Optional, cast
+from typing import Any, Container, Optional, cast
 
 from typing_extensions import Protocol
 
 from .runtime import runtime
 from .utils import find_last_user_frames, find_last_user_stacklevel
 
-__all__ = ("clone_class", "clone_module")
+__all__ = ("clone_module", "wrap_class")
 
 FALLBACK_WARNING = (
     "cuNumeric has not implemented {name} "
@@ -106,6 +106,23 @@ def implemented(
     return wrapper
 
 
+# Convert all cuNumeric arrays into NumPy arrays within a data structure.
+# The recursion logic is rather limited, but this function is meant to be
+# used for arguments of NumPy API calls, which shouldn't nest their arrays
+# very deep.
+def _convert_all_arrays(obj):
+    if type(obj) == list:
+        return [_convert_all_arrays(x) for x in obj]
+    elif type(obj) == tuple:
+        return tuple(_convert_all_arrays(x) for x in obj)
+    elif type(obj) == dict:
+        return {k: _convert_all_arrays(v) for k, v in obj.items()}
+    elif hasattr(obj, "__array__"):
+        return obj.__array__()
+    else:
+        return obj
+
+
 def unimplemented(
     func: AnyCallable, prefix: str, name: str, reporting: bool = True
 ) -> CuWrapped:
@@ -132,6 +149,8 @@ def unimplemented(
                 location=location,
                 implemented=False,
             )
+            args = _convert_all_arrays(args)
+            kwargs = _convert_all_arrays(kwargs)
             return func(*args, **kwargs)
 
     else:
@@ -144,6 +163,8 @@ def unimplemented(
                 stacklevel=stacklevel,
                 category=RuntimeWarning,
             )
+            args = _convert_all_arrays(args)
+            kwargs = _convert_all_arrays(kwargs)
             return func(*args, **kwargs)
 
     wrapper._cunumeric = CuWrapperMetadata(implemented=False)
@@ -201,17 +222,11 @@ def clone_module(
             new_globals[attr] = value
 
 
-def clone_class(origin_class: type) -> Callable[[type], type]:
-    """Copy attributes from one class to another
+def wrap_class(cls: type) -> type:
+    """Wrap all methods with a decorator that reports API calls, and mark as
+    unimplemented those that are copied directly from the base class.
 
-    Method types are wrapped with a decorator to report API calls. All
-    other values are copied as-is.
-
-    Parameters
-    ----------
-    origin_class : type
-        Existing class type to clone attributes from
-
+    Non-method attributes are not touched.
     """
 
     def should_wrap(obj: object) -> bool:
@@ -219,35 +234,30 @@ def clone_class(origin_class: type) -> Callable[[type], type]:
             obj, (FunctionType, MethodType, MethodDescriptorType)
         )
 
-    def decorator(cls: type) -> type:
-        class_name = f"{origin_class.__module__}.{origin_class.__name__}"
+    assert len(cls.__bases__) == 1
+    origin_class = cls.__bases__[0]
+    class_name = f"{origin_class.__module__}.{origin_class.__name__}"
 
-        missing = filter_namespace(
-            origin_class.__dict__,
-            # this simply omits ndarray internal methods for any class. If
-            # we ever need to wrap more classes we may need to generalize to
-            # per-class specification of internal names to skip
-            omit_names=set(cls.__dict__).union(NDARRAY_INTERNAL),
-        )
+    missing = filter_namespace(
+        origin_class.__dict__,
+        # this simply omits ndarray internal methods for any class. If
+        # we ever need to wrap more classes we may need to generalize to
+        # per-class specification of internal names to skip
+        omit_names=set(cls.__dict__).union(NDARRAY_INTERNAL),
+    )
 
-        reporting = runtime.report_coverage
+    reporting = runtime.report_coverage
 
-        for attr, value in cls.__dict__.items():
-            if should_wrap(value):
-                wrapped = implemented(
-                    value, class_name, attr, reporting=reporting
-                )
-                setattr(cls, attr, wrapped)
+    for attr, value in cls.__dict__.items():
+        if should_wrap(value):
+            wrapped = implemented(value, class_name, attr, reporting=reporting)
+            setattr(cls, attr, wrapped)
 
-        for attr, value in missing.items():
-            if should_wrap(value):
-                wrapped = unimplemented(
-                    value, class_name, attr, reporting=reporting
-                )
-                setattr(cls, attr, wrapped)
-            else:
-                setattr(cls, attr, value)
+    for attr, value in missing.items():
+        if should_wrap(value):
+            wrapped = unimplemented(
+                value, class_name, attr, reporting=reporting
+            )
+            setattr(cls, attr, wrapped)
 
-        return cls
-
-    return decorator
+    return cls

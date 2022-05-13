@@ -24,7 +24,7 @@ import pyarrow
 from legate.core import Array
 
 from .config import FFTDirection, FFTNormalization, UnaryOpCode, UnaryRedCode
-from .coverage import clone_class
+from .coverage import wrap_class
 from .runtime import runtime
 from .utils import broadcast_shapes, dot_modes
 
@@ -162,8 +162,14 @@ def convert_to_predicate_ndarray(obj):
     )
 
 
-@clone_class(np.ndarray)
-class ndarray:
+@wrap_class
+class ndarray(np.ndarray):
+    def __new__(cls, shape, *args, **kwargs):
+        dtype = kwargs.get("dtype")
+        # We initialize our parent class as if this was an empty array, to
+        # avoid wasting space.
+        return super().__new__(cls, (0,), dtype=dtype)
+
     def __init__(
         self,
         shape,
