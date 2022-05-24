@@ -20,7 +20,7 @@ import cunumeric.utils as m  # module under test
 import numpy as np
 import pytest
 
-SUPPORTED_DTYPES = [
+EXPECTED_SUPPORTED_DTYPES = [
     np.float16,
     np.float32,
     np.float64,
@@ -35,6 +35,33 @@ SUPPORTED_DTYPES = [
     np.bool_,
     bool,
 ]
+
+
+class Test_is_advanced_indexing:
+    def test_Ellipsis(self):
+        assert not m.is_advanced_indexing(...)
+
+    def test_None(self):
+        assert not m.is_advanced_indexing(None)
+
+    @pytest.mark.parametrize("typ", EXPECTED_SUPPORTED_DTYPES)
+    def test_np_scalar(self, typ):
+        assert not m.is_advanced_indexing(typ(10))
+
+    def test_slice(self):
+        assert not m.is_advanced_indexing(slice(None, 10))
+        assert not m.is_advanced_indexing(slice(1, 10))
+        assert not m.is_advanced_indexing(slice(None, 10, 2))
+
+    def test_tuple_False(self):
+        assert not m.is_advanced_indexing((..., None, np.int32()))
+
+    def test_tuple_True(self):
+        assert m.is_advanced_indexing(([1, 2, 3], np.array([1, 2])))
+
+    def test_advanced(self):
+        assert m.is_advanced_indexing([1, 2, 3])
+        assert m.is_advanced_indexing(np.array([1, 2, 3]))
 
 
 def test_find_last_user_stacklevel() -> None:
@@ -57,7 +84,7 @@ def test_get_line_number_from_frame() -> None:
 
 
 class Test_find_last_user_frames:
-    def test_default_top_only(self) -> None:
+    def check_default_top_only(self) -> None:
         result = m.find_last_user_frames(top_only=True)
         assert isinstance(result, str)
         assert "|" not in result
@@ -81,6 +108,10 @@ class Test_find_last_user_frames:
         assert all(len(x.split(":")) == 2 for x in result.split("|"))
 
 
+def test__SUPPORTED_DTYPES():
+    assert m._SUPPORTED_DTYPES == EXPECTED_SUPPORTED_DTYPES
+
+
 class Test_is_supported_dtype:
     @pytest.mark.parametrize(
         "value", ["foo", 10, 10.2, [], (), {}, set(), None]
@@ -89,7 +120,7 @@ class Test_is_supported_dtype:
         with pytest.raises(TypeError):
             m.is_supported_dtype(value)
 
-    @pytest.mark.parametrize("value", SUPPORTED_DTYPES)
+    @pytest.mark.parametrize("value", EXPECTED_SUPPORTED_DTYPES)
     def test_supported(self, value) -> None:
         assert m.is_supported_dtype(np.dtype(value))
 
@@ -284,3 +315,9 @@ class Test_tensordot_modes:
     )
     def test_explicit_axis(self, a: int, b: int, axes: AxesType):
         assert _tensordot_modes_oracle(a, b, axes)
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(pytest.main(sys.argv))

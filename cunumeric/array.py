@@ -23,25 +23,21 @@ import pyarrow
 
 from legate.core import Array
 
-from .config import UnaryOpCode, UnaryRedCode
+from .config import FFTDirection, FFTNormalization, UnaryOpCode, UnaryRedCode
 from .coverage import clone_class
 from .runtime import runtime
 from .utils import dot_modes
 
 
-def add_boilerplate(*array_params: str, mutates_self: bool = False):
+def add_boilerplate(*array_params: str):
     """
-    Adds required boilerplate to the wrapped cuNumeric ndarray member function.
+    Adds required boilerplate to the wrapped cunumeric.ndarray or module-level
+    function.
 
     Every time the wrapped function is called, this wrapper will:
     * Convert all specified array-like parameters, plus the special "out"
       parameter (if present), to cuNumeric ndarrays.
     * Convert the special "where" parameter (if present) to a valid predicate.
-    * Handle the case of scalar cuNumeric ndarrays, by forwarding the operation
-      to the equivalent `()`-shape numpy array.
-
-    NOTE: Assumes that no parameters are mutated besides `out`, and `self` if
-    `mutates_self` is True.
     """
     keys: Set[str] = set(array_params)
 
@@ -61,7 +57,6 @@ def add_boilerplate(*array_params: str, mutates_self: bool = False):
             if param == "where":
                 where_idx = idx
             elif param == "out":
-                assert not mutates_self
                 out_idx = idx
             elif param in keys:
                 indices.add(idx)
@@ -69,7 +64,6 @@ def add_boilerplate(*array_params: str, mutates_self: bool = False):
 
         @wraps(func)
         def wrapper(*args, **kwargs):
-            self = args[0]
             assert (where_idx is None or len(args) <= where_idx) and (
                 out_idx is None or len(args) <= out_idx
             ), "'where' and 'out' should be passed as keyword arguments"
@@ -91,61 +85,11 @@ def add_boilerplate(*array_params: str, mutates_self: bool = False):
                 elif k in keys:
                     kwargs[k] = convert_to_cunumeric_ndarray(v)
 
-            # Handle the case where all array-like parameters are scalar, by
-            # performing the operation on the equivalent scalar numpy arrays.
-            # NOTE: This implicitly blocks on the contents of these arrays.
-            if all(
-                arg._thunk.scalar
-                for (idx, arg) in enumerate(args)
-                if (idx in indices or idx == 0) and isinstance(arg, ndarray)
-            ) and all(
-                v._thunk.scalar
-                for (k, v) in kwargs.items()
-                if (k in keys or k == "where") and isinstance(v, ndarray)
-            ):
-                out = None
-                if "out" in kwargs:
-                    out = kwargs["out"]
-                    del kwargs["out"]
-                args = tuple(
-                    arg._thunk.__numpy_array__()
-                    if (idx in indices or idx == 0)
-                    and isinstance(arg, ndarray)
-                    else arg
-                    for (idx, arg) in enumerate(args)
-                )
-                for (k, v) in kwargs.items():
-                    if (k in keys or k == "where") and isinstance(v, ndarray):
-                        kwargs[k] = v._thunk.__numpy_array__()
-                self_scalar = args[0]
-                args = args[1:]
-                res_scalar = getattr(self_scalar, func.__name__)(
-                    *args, **kwargs
-                )
-                if mutates_self:
-                    self._thunk = runtime.create_scalar(
-                        self_scalar.data,
-                        self_scalar.dtype,
-                        shape=self_scalar.shape,
-                        wrap=True,
-                    )
-                    return
-                result = convert_to_cunumeric_ndarray(res_scalar)
-                if out is not None:
-                    out._thunk.copy(result._thunk)
-                    result = out
-                return result
-
             return func(*args, **kwargs)
 
         return wrapper
 
     return decorator
-
-
-def broadcast_shapes(*args):
-    arrays = [np.empty(x, dtype=[]) for x in args]
-    return np.broadcast(*arrays).shape
 
 
 def convert_to_cunumeric_ndarray(obj, share=False):
@@ -165,6 +109,26 @@ def convert_to_predicate_ndarray(obj):
     raise NotImplementedError(
         "the `where` parameter is currently not supported"
     )
+
+
+def _convert_all_to_numpy(obj):
+    """
+    Converts all cuNumeric arrays within a data structure into NumPy arrays.
+
+    The recursion logic is rather limited, but this function is meant to be
+    used for arguments of NumPy API calls, which shouldn't nest their arrays
+    very deep.
+    """
+    if type(obj) == list:
+        return [_convert_all_to_numpy(x) for x in obj]
+    elif type(obj) == tuple:
+        return tuple(_convert_all_to_numpy(x) for x in obj)
+    elif type(obj) == dict:
+        return {k: _convert_all_to_numpy(v) for k, v in obj.items()}
+    elif isinstance(obj, ndarray):
+        return obj.__array__()
+    else:
+        return obj
 
 
 @clone_class(np.ndarray)
@@ -249,6 +213,57 @@ class ndarray:
     # @property
     # def __array_struct__(self):
     #    return self.__array__().__array_struct__
+
+    def __array_function__(self, func, types, args, kwargs):
+        import cunumeric as cn
+
+        # We are wrapping all NumPy modules, so we can expect to find every
+        # NumPy API call in cuNumeric, even if just an "unimplemented" stub.
+        module = reduce(getattr, func.__module__.split(".")[1:], cn)
+        cn_func = getattr(module, func.__name__)
+        # TODO: We should technically check at this point that all array-like
+        # arguments are convertible to `cunumeric.ndarray`, and if not then
+        # return `NotImplemented`, to give a chance to those other types to
+        # handle this call (assuming they also implement `__array_function__`).
+        # For now we will just assume that at the very least we can convert
+        # any such object to a baseline NumPy array using `np.array`, and
+        # consume that.
+
+        # TODO: We could check at this point that our implementation supports
+        # all the provided arguments, and fall back to NumPy if not.
+        return cn_func(*args, **kwargs)
+
+    def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
+        from . import _ufunc
+
+        # TODO: Similar to __array_function__, we should technically confirm
+        # that all array-like arguments are convertible to `cunumeric.ndarray`.
+        # TODO: The logic below should be moved to a "clone_ufunc" wrapper,
+        # that emits a proper warning to the user in case of fallback.
+
+        if hasattr(_ufunc, ufunc.__name__):
+            cn_ufunc = getattr(_ufunc, ufunc.__name__)
+            if hasattr(cn_ufunc, method):
+                cn_method = getattr(cn_ufunc, method)
+                # TODO: We could check at this point that our implementation
+                # supports all the provided arguments, and fall back to
+                # NumPy if not.
+                return cn_method(*inputs, **kwargs)
+
+        # We cannot handle this ufunc call, so we will fall back to NumPy.
+        # Ideally we would be able to skip the __array_ufunc__ dispatch, and
+        # let NumPy convert our arrays automatically by calling our __array__
+        # method, similar to what we are doing for __array_function__ in
+        # coverage.py, by going through the _implementation field.
+        # Unfortunately, there is no easy way to skip the dispatch mechnanism
+        # for ufuncs, therefore the best we can do is manually convert all
+        # cuNumeric arrays into NumPy arrays and try the call again.
+        # One would expect NumPy to do exactly this if all __array_ufunc__
+        # implementations return `NotImplemented` for a particular call, but
+        # alas NumPy will simply fail in that case.
+        inputs = _convert_all_to_numpy(inputs)
+        kwargs = _convert_all_to_numpy(kwargs)
+        return getattr(ufunc, method)(*inputs, **kwargs)
 
     @property
     def T(self):
@@ -641,9 +656,8 @@ class ndarray:
             UnaryRedCode.CONTAINS,
             self,
             axis=None,
-            dtype=np.dtype(np.bool_),
+            res_dtype=bool,
             args=args,
-            check_types=False,
         )
 
     def __copy__(self):
@@ -772,8 +786,19 @@ class ndarray:
         elif isinstance(key, tuple) and first:
             return tuple(self._convert_key(k, first=False) for k in key)
         else:
-            # Otherwise convert it to a cuNumeric array and get the thunk
-            return convert_to_cunumeric_ndarray(key)._thunk
+            # Otherwise convert it to a cuNumeric array, check types
+            # and get the thunk
+            key = convert_to_cunumeric_ndarray(key)
+            if key.dtype != bool and not np.issubdtype(key.dtype, np.integer):
+                raise TypeError("index arrays should be int or bool type")
+            if key.dtype != bool and key.dtype != np.int64:
+                runtime.warn(
+                    "converting index array to int64 type",
+                    category=RuntimeWarning,
+                )
+                key = key.astype(np.int64)
+
+            return key._thunk
 
     @add_boilerplate()
     def __getitem__(self, key):
@@ -1424,7 +1449,7 @@ class ndarray:
 
     # __setattr__
 
-    @add_boilerplate("value", mutates_self=True)
+    @add_boilerplate("value")
     def __setitem__(self, key, value):
         """__setitem__(key, value, /)
 
@@ -1546,10 +1571,9 @@ class ndarray:
             UnaryRedCode.ALL,
             self,
             axis=axis,
-            dst=out,
+            res_dtype=bool,
+            out=out,
             keepdims=keepdims,
-            dtype=np.dtype(np.bool_),
-            check_types=False,
             initial=initial,
             where=where,
         )
@@ -1582,15 +1606,15 @@ class ndarray:
             UnaryRedCode.ANY,
             self,
             axis=axis,
-            dst=out,
+            res_dtype=bool,
+            out=out,
             keepdims=keepdims,
-            dtype=np.dtype(np.bool_),
-            check_types=False,
             initial=initial,
             where=where,
         )
 
-    def argmax(self, axis=None, out=None):
+    @add_boilerplate()
+    def argmax(self, axis=None, out=None, keepdims=False):
         """a.argmax(axis=None, out=None)
 
         Return indices of the maximum values along the given axis.
@@ -1606,24 +1630,21 @@ class ndarray:
         Multiple GPUs, Multiple CPUs
 
         """
-        if self.size == 1:
-            return 0
-        if axis is None:
-            axis = self.ndim - 1
-        elif type(axis) != int:
-            raise TypeError("'axis' argument for argmax must be an 'int'")
-        elif axis < 0 or axis >= self.ndim:
-            raise TypeError("invalid 'axis' argument for argmax " + str(axis))
+        if out is not None and out.dtype != np.int64:
+            raise ValueError("output array must have int64 dtype")
+        if axis is not None and not isinstance(axis, int):
+            raise ValueError("axis must be an integer")
         return self._perform_unary_reduction(
             UnaryRedCode.ARGMAX,
             self,
             axis=axis,
-            dtype=np.dtype(np.int64),
-            dst=out,
-            check_types=False,
+            res_dtype=np.dtype(np.int64),
+            out=out,
+            keepdims=keepdims,
         )
 
-    def argmin(self, axis=None, out=None):
+    @add_boilerplate()
+    def argmin(self, axis=None, out=None, keepdims=False):
         """a.argmin(axis=None, out=None)
 
         Return indices of the minimum values along the given axis.
@@ -1639,21 +1660,17 @@ class ndarray:
         Multiple GPUs, Multiple CPUs
 
         """
-        if self.size == 1:
-            return 0
-        if axis is None:
-            axis = self.ndim - 1
-        elif type(axis) != int:
-            raise TypeError("'axis' argument for argmin must be an 'int'")
-        elif axis < 0 or axis >= self.ndim:
-            raise TypeError("invalid 'axis' argument for argmin " + str(axis))
+        if out is not None and out.dtype != np.int64:
+            raise ValueError("output array must have int64 dtype")
+        if axis is not None and not isinstance(axis, int):
+            raise ValueError("axis must be an integer")
         return self._perform_unary_reduction(
             UnaryRedCode.ARGMIN,
             self,
             axis=axis,
-            dtype=np.dtype(np.int64),
-            dst=out,
-            check_types=False,
+            res_dtype=np.dtype(np.int64),
+            out=out,
+            keepdims=keepdims,
         )
 
     def astype(
@@ -1733,6 +1750,83 @@ class ndarray:
         result._thunk.convert(self._thunk, warn=False)
         return result
 
+    @add_boilerplate()
+    def take(self, indices, axis=None, out=None, mode="raise"):
+        """a.take(indices, axis=None, out=None, mode="raise")
+
+        Take elements from an array along an axis.
+
+        Refer to :func:`cunumeric.take` for full documentation.
+
+        See Also
+        --------
+        cunumeric.take : equivalent function
+
+        Availability
+        --------
+        Multiple GPUs, Multiple CPUs
+
+        """
+        if not np.isscalar(indices):
+            # if indices is a tuple or list, bring sub-tuples to the same shape
+            # and concatenate them
+            indices = convert_to_cunumeric_ndarray(indices)
+
+        if axis is None:
+            self = self.ravel()
+            axis = 0
+        elif axis < 0:
+            axis = self.ndim + axis
+        if axis < 0 or axis >= self.ndim:
+            raise ValueError("axis argument is out of bounds")
+
+        # TODO remove "raise" logic when bounds check for advanced
+        # indexing is implementd
+        if mode == "raise":
+            if np.isscalar(indices):
+                if (indices < -self.shape[axis]) or (
+                    indices >= self.shape[axis]
+                ):
+                    raise ValueError("invalid entry in indices array")
+            else:
+                if (indices < -self.shape[axis]).any() or (
+                    indices >= self.shape[axis]
+                ).any():
+                    raise ValueError("invalid entry in indices array")
+        elif mode == "wrap":
+            indices = indices % self.shape[axis]
+        elif mode == "clip":
+            if np.isscalar(indices):
+                if indices >= self.shape[axis]:
+                    indices = self.shape[axis] - 1
+                if indices < 0:
+                    indices = 0
+            else:
+                indices = indices.clip(0, self.shape[axis] - 1)
+        else:
+            raise ValueError(
+                "Invalid mode '{}' for take operation".format(mode)
+            )
+        if self.shape[axis] == 0:
+            if indices.size != 0:
+                raise IndexError(
+                    "Cannot do a non-empty take() from an empty axis."
+                )
+            return self.copy()
+
+        point_indices = tuple(slice(None) for i in range(0, axis))
+        point_indices += (indices,)
+        if out is not None:
+            if out.dtype != self.dtype:
+                raise ValueError("Type mismatch: out array has wrong type")
+            out[:] = self[point_indices]
+            return out
+        else:
+            res = self[point_indices]
+            if np.isscalar(indices):
+                res = res.copy()
+            return res
+
     def choose(self, choices, out=None, mode="raise"):
         """a.choose(choices, out=None, mode='raise')
 
@@ -1751,7 +1845,7 @@ class ndarray:
         """
         a = self
         if out is not None:
-            out = convert_to_cunumeric_ndarray(out)
+            out = convert_to_cunumeric_ndarray(out, share=True)
 
         if isinstance(choices, list):
             choices = tuple(choices)
@@ -1791,12 +1885,14 @@ class ndarray:
         # we need to broadcast all arrays in choices with
         # input and output arrays
         if out is not None:
-            out_shape = broadcast_shapes(a.shape, choices[0].shape, out.shape)
+            out_shape = np.broadcast_shapes(
+                a.shape, choices[0].shape, out.shape
+            )
         else:
-            out_shape = broadcast_shapes(a.shape, choices[0].shape)
+            out_shape = np.broadcast_shapes(a.shape, choices[0].shape)
 
         for c in choices:
-            out_shape = broadcast_shapes(out_shape, c.shape)
+            out_shape = np.broadcast_shapes(out_shape, c.shape)
 
         # if output is provided, it shape should be the same as out_shape
         if out is not None and out.shape != out_shape:
@@ -1827,6 +1923,59 @@ class ndarray:
             return out
         else:
             return out_arr
+
+    @add_boilerplate()
+    def compress(self, condition, axis=None, out=None):
+        """a.compress(self, condition, axis=None, out=None)
+
+        Return selected slices of an array along given axis..
+
+        Refer to :func:`cunumeric.compress` for full documentation.
+
+        See Also
+        --------
+        cunumeric.compress : equivalent function
+
+        Availability
+        --------
+        Multiple GPUs, Multiple CPUs
+
+        """
+        a = self
+        if condition.ndim != 1:
+            raise ValueError(
+                "Dimension mismatch: condition must be a 1D array"
+            )
+        if condition.dtype != bool:
+            runtime.warn(
+                "converting condition to bool type",
+                category=RuntimeWarning,
+            )
+            condition = condition.astype(bool)
+        if axis is None:
+            axis = 0
+            a = self.ravel()
+
+        if a.shape[axis] < condition.shape[0]:
+            raise ValueError(
+                "Shape mismatch: "
+                "condition contains entries that are out of bounds"
+            )
+        elif a.shape[axis] > condition.shape[0]:
+            slice_tuple = tuple(slice(None) for ax in range(axis)) + (
+                slice(0, condition.shape[0]),
+            )
+            a = a[slice_tuple]
+
+        index_tuple = tuple(slice(None) for ax in range(axis))
+        index_tuple += (condition,)
+
+        if out is not None:
+            out[:] = a[index_tuple]
+            return out
+        else:
+            res = a[index_tuple]
+            return res
 
     def clip(self, min=None, max=None, out=None):
         """a.clip(min=None, max=None, out=None)
@@ -1926,10 +2075,25 @@ class ndarray:
     # currently offset option is implemented only for the case of number of
     # axes=2. This restriction can be lifted in the future if there is a
     # use case of having arbitrary number of offsets
-    def _diag_helper(self, offset=0, axes=None, extract=True):
+    def _diag_helper(
+        self,
+        offset=0,
+        axes=None,
+        extract=True,
+        trace=False,
+        out=None,
+        dtype=None,
+    ):
         # _diag_helper can be used only for arrays with dim>=1
         if self.ndim < 1:
             raise ValueError("_diag_helper is implemented for dim>=1")
+        # out should be passed only for Trace
+        if out is not None and not trace:
+            raise ValueError("_diag_helper supports out only for trace=True")
+        # dtype should be passed only for Trace
+        if dtype is not None and not trace:
+            raise ValueError("_diag_helper supports dtype only for trace=True")
+
         elif self.ndim == 1:
             if axes is not None:
                 raise ValueError(
@@ -1940,10 +2104,7 @@ class ndarray:
             out = ndarray((m, m), dtype=self.dtype, inputs=(self,))
             diag_size = self.shape[0]
             out._thunk._diag_helper(
-                self._thunk,
-                offset=offset,
-                naxes=0,
-                extract=False,
+                self._thunk, offset=offset, naxes=0, extract=False, trace=False
             )
         else:
             N = len(axes)
@@ -1996,14 +2157,36 @@ class ndarray:
 
             tr_shape = tuple(a.shape[i] for i in range(a.ndim - N))
             # calculate shape of the output array
-            out_shape = tr_shape + (diag_size,)
-            out = ndarray(shape=out_shape, dtype=self.dtype, inputs=(self,))
+            if trace:
+                if N != 2:
+                    raise ValueError(
+                        " exactly 2 axes should be passed to trace"
+                    )
+                if self.ndim == 2:
+                    out_shape = (1,)
+                elif self.ndim > 2:
+                    out_shape = tr_shape
+                else:
+                    raise ValueError(
+                        "dimension of the array for trace operation:"
+                        " should be >=2"
+                    )
+            else:
+                out_shape = tr_shape + (diag_size,)
+
+            if out is not None:
+                if out.shape != out_shape:
+                    raise ValueError("output array has wrong shape")
+                a = a._maybe_convert(out.dtype, (a, out))
+            else:
+                out = ndarray(
+                    shape=out_shape, dtype=self.dtype, inputs=(self,)
+                )
+            if out is None and dtype is not None:
+                a = a._maybe_convert(dtype, (a,))
 
             out._thunk._diag_helper(
-                a._thunk,
-                offset=offset,
-                naxes=N,
-                extract=extract,
+                a._thunk, offset=offset, naxes=N, extract=extract, trace=trace
             )
         return out
 
@@ -2044,6 +2227,47 @@ class ndarray:
             ):
                 raise ValueError("Either axis1/axis2 or axes must be supplied")
         return self._diag_helper(offset=offset, axes=axes, extract=extract)
+
+    @add_boilerplate()
+    def trace(self, offset=0, axis1=None, axis2=None, dtype=None, out=None):
+        """a.trace(offset=0, axis1=None, axis2=None, dtype = None, out = None)
+
+        Return the sum along diagonals of the array.
+
+        Refer to :func:`cunumeric.trace` for full documentation.
+
+        See Also
+        --------
+        cunumeric.trace : equivalent function
+
+        Availability
+        --------
+        Multiple GPUs, Multiple CPUs
+
+        """
+        if self.ndim < 2:
+            raise ValueError(
+                "trace operation can't be called on a array with DIM<2"
+            )
+
+        axes = []
+        if (axis1 is None) and (axis2 is None):
+            # default values for axis
+            axes = (0, 1)
+        elif (axis1 is None) or (axis2 is None):
+            raise ValueError("both axes should be passed")
+        else:
+            axes = (axis1, axis2)
+
+        res = self._diag_helper(
+            offset=offset, axes=axes, trace=True, out=out, dtype=dtype
+        )
+
+        # for 2D arrays we must return scalar
+        if self.ndim == 2:
+            res = res[0]
+
+        return res
 
     @add_boilerplate("rhs")
     def dot(self, rhs, out=None):
@@ -2115,6 +2339,130 @@ class ndarray:
 
         """
         return self.__array__().dumps()
+
+    def _normalize_axes_shape(self, axes, s):
+        user_axes = axes is not None
+        user_sizes = s is not None
+        if user_axes and user_sizes and len(axes) != len(s):
+            raise ValueError("Shape and axes have different lengths")
+        if user_axes:
+            fft_axes = [ax if ax >= 0 else ax + self.ndim for ax in axes]
+            if min(fft_axes) < 0 or max(fft_axes) >= self.ndim:
+                raise ValueError(
+                    "Axis is out of bounds for array of size {}".format(
+                        self.ndim
+                    )
+                )
+        else:
+            fft_axes = range(len(s)) if user_sizes else range(self.ndim)
+
+        fft_s = list(self.shape)
+        if user_sizes:
+            for idx, ax in enumerate(fft_axes):
+                fft_s[ax] = s[idx]
+        return np.asarray(fft_axes), np.asarray(fft_s)
+
+    def fft(self, s, axes, kind, direction, norm):
+        """a.fft(s, axes, kind, direction, norm)
+
+        Return the ``kind`` ``direction`` FFT of this array
+        with normalization ``norm``.
+
+        Common entrypoint for FFT functionality in cunumeric.fft module.
+
+        See Also
+        --------
+        cunumeric.fft : FFT functions for different ``kind`` and
+        ``direction`` arguments
+
+        Availability
+        --------
+        Single GPU
+
+        """
+        # Dimensions check
+        if self.ndim > 3:
+            raise NotImplementedError(
+                f"{self.ndim}-D arrays are not supported yet"
+            )
+
+        # Type
+        fft_output_type = kind.output_dtype
+
+        # Axes and sizes
+        user_sizes = s is not None
+        fft_axes, fft_s = self._normalize_axes_shape(axes, s)
+
+        # Shape
+        fft_input = self
+        fft_input_shape = np.asarray(self.shape)
+        fft_output_shape = np.asarray(self.shape)
+        if user_sizes:
+            # Zero padding if any of the user sizes is larger than input
+            zeropad_input = self
+            if np.any(np.greater(fft_s, fft_input_shape)):
+                # Create array with superset shape, fill with zeros,
+                # and copy input in
+                max_size = np.maximum(fft_s, fft_input_shape)
+                zeropad_input = ndarray(shape=max_size, dtype=fft_input.dtype)
+                zeropad_input.fill(0)
+                slices = tuple(slice(0, i) for i in fft_input.shape)
+                zeropad_input._thunk.set_item(slices, fft_input._thunk)
+
+            # Slicing according to final shape
+            for idx, ax in enumerate(fft_axes):
+                fft_input_shape[ax] = s[idx]
+            # TODO: always copying is not the best idea,
+            # sometimes a view of the original input will do
+            slices = tuple(slice(0, i) for i in fft_s)
+            fft_input = ndarray(
+                shape=fft_input_shape,
+                thunk=zeropad_input._thunk.get_item(slices),
+            )
+            fft_output_shape = np.copy(fft_input_shape)
+
+        # R2C/C2R require different output shapes
+        if fft_output_type != self.dtype:
+            # R2C/C2R dimension is the last axis
+            lax = fft_axes[-1]
+            if direction == FFTDirection.FORWARD:
+                fft_output_shape[lax] = fft_output_shape[lax] // 2 + 1
+            else:
+                if user_sizes:
+                    fft_output_shape[lax] = s[-1]
+                else:
+                    fft_output_shape[lax] = 2 * (fft_input.shape[lax] - 1)
+
+        # Execute FFT backend
+        out = ndarray(
+            shape=fft_output_shape,
+            dtype=fft_output_type,
+        )
+        out._thunk.fft(fft_input._thunk, fft_axes, kind, direction)
+
+        # Normalization
+        fft_norm = FFTNormalization.from_string(norm)
+        do_normalization = any(
+            (
+                fft_norm == FFTNormalization.ORTHOGONAL,
+                fft_norm == FFTNormalization.FORWARD
+                and direction == FFTDirection.FORWARD,
+                fft_norm == FFTNormalization.INVERSE
+                and direction == FFTDirection.INVERSE,
+            )
+        )
+        if do_normalization:
+            if direction == FFTDirection.FORWARD:
+                norm_shape = fft_input.shape
+            else:
+                norm_shape = out.shape
+            norm_shape_along_axes = [norm_shape[ax] for ax in fft_axes]
+            factor = np.product(norm_shape_along_axes)
+            if fft_norm == FFTNormalization.ORTHOGONAL:
+                factor = np.sqrt(factor)
+            return out / factor
+
+        return out
 
     def fill(self, value):
         """a.fill(value)
@@ -2304,7 +2652,7 @@ class ndarray:
             UnaryRedCode.MAX,
             self,
             axis=axis,
-            dst=out,
+            out=out,
             keepdims=keepdims,
             initial=initial,
             where=where,
@@ -2400,11 +2748,60 @@ class ndarray:
             UnaryRedCode.MIN,
             self,
             axis=axis,
-            dst=out,
+            out=out,
             keepdims=keepdims,
             initial=initial,
             where=where,
         )
+
+    @add_boilerplate()
+    def partition(self, kth, axis=-1, kind="introselect", order=None):
+        """a.partition(kth, axis=-1, kind='introselect', order=None)
+
+        Partition of an array in-place.
+
+        Refer to :func:`cunumeric.partition` for full documentation.
+
+        See Also
+        --------
+        cunumeric.partition : equivalent function
+
+        Availability
+        --------
+        Multiple GPUs, Single CPU
+
+        """
+        self._thunk.partition(
+            rhs=self._thunk, kth=kth, axis=axis, kind=kind, order=order
+        )
+
+    @add_boilerplate()
+    def argpartition(self, kth, axis=-1, kind="introselect", order=None):
+        """a.argpartition(kth, axis=-1, kind='introselect', order=None)
+
+        Returns the indices that would partition this array.
+
+        Refer to :func:`cunumeric.argpartition` for full documentation.
+
+        See Also
+        --------
+        cunumeric.argpartition : equivalent function
+
+        Availability
+        --------
+        Multiple GPUs, Single CPU
+
+        """
+        result = ndarray(self.shape, np.int64)
+        result._thunk.partition(
+            rhs=self._thunk,
+            argpartition=True,
+            kth=kth,
+            axis=axis,
+            kind=kind,
+            order=order,
+        )
+        return result
 
     @add_boilerplate()
     def prod(
@@ -2446,7 +2843,8 @@ class ndarray:
             UnaryRedCode.PROD,
             self_array,
             axis=axis,
-            dst=out,
+            dtype=dtype,
+            out=out,
             keepdims=keepdims,
             initial=initial,
             where=where,
@@ -2602,12 +3000,44 @@ class ndarray:
         self.__array__().setflags(write=write, align=align, uic=uic)
 
     def sort(self, axis=-1, kind="quicksort", order=None):
+        """a.sort(axis=-1, kind=None, order=None)
+
+        Sort an array in-place.
+
+        Refer to :func:`cunumeric.sort` for full documentation.
+
+        See Also
+        --------
+        cunumeric.sort : equivalent function
+
+        Availability
+        --------
+        Multiple GPUs, Single CPU
+
+        """
         self._thunk.sort(rhs=self._thunk, axis=axis, kind=kind, order=order)
 
-    def argsort(self, axis=-1, kind="quicksort", order=None):
-        self._thunk.sort(
+    def argsort(self, axis=-1, kind=None, order=None):
+        """a.argsort(axis=-1, kind=None, order=None)
+
+        Returns the indices that would sort this array.
+
+        Refer to :func:`cunumeric.argsort` for full documentation.
+
+        See Also
+        --------
+        cunumeric.argsort : equivalent function
+
+        Availability
+        --------
+        Multiple GPUs, Single CPU
+
+        """
+        result = ndarray(self.shape, np.int64)
+        result._thunk.sort(
             rhs=self._thunk, argsort=True, axis=axis, kind=kind, order=order
         )
+        return result
 
     def squeeze(self, axis=None):
         """a.squeeze(axis=None)
@@ -2687,7 +3117,8 @@ class ndarray:
             UnaryRedCode.SUM,
             self_array,
             axis=axis,
-            dst=out,
+            dtype=dtype,
+            out=out,
             keepdims=keepdims,
             initial=initial,
             where=where,
@@ -2885,24 +3316,12 @@ class ndarray:
         if self.ndim == 1:
             return self
         if axes is None:
-            result = ndarray(
-                self.shape[::-1],
-                dtype=self.dtype,
-                inputs=(self,),
-            )
             axes = tuple(range(self.ndim - 1, -1, -1))
-        elif len(axes) == self.ndim:
-            result = ndarray(
-                shape=tuple(self.shape[idx] for idx in axes),
-                dtype=self.dtype,
-                inputs=(self,),
-            )
-        else:
+        elif len(axes) != self.ndim:
             raise ValueError(
                 "axes must be the same size as ndim for transpose"
             )
-        result._thunk.transpose(self._thunk, axes)
-        return result
+        return ndarray(shape=None, thunk=self._thunk.transpose(axes))
 
     def flip(self, axis=None):
         """
@@ -3006,7 +3425,7 @@ class ndarray:
                 array_types.append(array.dtype)
         return np.find_common_type(array_types, scalar_types)
 
-    def _maybe_convert(self, dtype, *hints):
+    def _maybe_convert(self, dtype, hints):
         if self.dtype == dtype:
             return self
         copy = ndarray(shape=self.shape, dtype=dtype, inputs=hints)
@@ -3029,13 +3448,13 @@ class ndarray:
             # If the shapes don't match see if we can broadcast
             # This will raise an exception if they can't be broadcast together
             if isinstance(where, ndarray):
-                broadcast_shapes(src.shape, dst.shape, where.shape)
+                np.broadcast_shapes(src.shape, dst.shape, where.shape)
             else:
-                broadcast_shapes(src.shape, dst.shape)
+                np.broadcast_shapes(src.shape, dst.shape)
         else:
             # No output yet, so make one
             if isinstance(where, ndarray):
-                out_shape = broadcast_shapes(src.shape, where.shape)
+                out_shape = np.broadcast_shapes(src.shape, where.shape)
             else:
                 out_shape = src.shape
             if dtype is not None:
@@ -3119,138 +3538,114 @@ class ndarray:
         src,
         axis=None,
         dtype=None,
-        dst=None,
+        res_dtype=None,
+        out=None,
         keepdims=False,
         args=None,
-        check_types=True,
         initial=None,
         where=True,
     ):
+        # When 'res_dtype' is not None, the input and output of the reduction
+        # have different types. Such reduction operators don't take a dtype of
+        # the accumulator
+        if res_dtype is not None:
+            assert dtype is None
+            dtype = src.dtype
+        else:
+            # If 'dtype' exists, that determines both the accumulation dtype
+            # and the output dtype
+            if dtype is not None:
+                res_dtype = dtype
+            elif out is not None:
+                dtype = out.dtype
+                res_dtype = out.dtype
+            else:
+                dtype = src.dtype
+                res_dtype = src.dtype
+
         # TODO: Need to require initial to be given when the array is empty
         #       or a where mask is given.
         if isinstance(where, ndarray):
             # The where array has to broadcast to the src.shape
-            if broadcast_shapes(src.shape, where.shape) != src.shape:
+            if np.broadcast_shapes(src.shape, where.shape) != src.shape:
                 raise ValueError(
                     '"where" array must broadcast against source array '
                     "for reduction"
                 )
+        if (
+            op
+            in (
+                UnaryRedCode.ARGMAX,
+                UnaryRedCode.ARGMIN,
+                UnaryRedCode.MAX,
+                UnaryRedCode.MIN,
+            )
+            and src.dtype.kind == "c"
+        ):
+            raise NotImplementedError(
+                "(arg)max/min not supported for complex-type arrays"
+            )
         # Compute the output shape
-        if axis is not None:
-            to_reduce = set()
-            if type(axis) == int:
-                if axis < 0:
-                    axis = len(src.shape) + axis
-                    if axis < 0:
-                        raise ValueError("Illegal 'axis' value")
-                elif axis >= src.ndim:
-                    raise ValueError("Illegal 'axis' value")
-                to_reduce.add(axis)
-                axes = (axis,)
-            elif type(axis) == tuple:
-                for ax in axis:
-                    if ax < 0:
-                        ax = len(src.shape) + ax
-                        if ax < 0:
-                            raise ValueError("Illegal 'axis' value")
-                    elif ax >= src.ndim:
-                        raise ValueError("Illegal 'axis' value")
-                    to_reduce.add(ax)
-                axes = axis
-            else:
-                raise TypeError(
-                    "Illegal type passed for 'axis' argument "
-                    + str(type(axis))
-                )
-            out_shape = ()
-            for dim in range(len(src.shape)):
-                if dim in to_reduce:
-                    if keepdims:
-                        out_shape += (1,)
-                else:
-                    out_shape += (src.shape[dim],)
-        else:
-            # Collapsing down to a single value in this case
-            out_shape = ()
-            axes = None
-        # if src.size == 0:
-        # return nd
-        if dst is None:
-            if dtype is not None:
-                dst = ndarray(
-                    shape=out_shape,
-                    dtype=dtype,
-                    inputs=(src, where),
-                )
-            else:
-                dst = ndarray(
-                    shape=out_shape,
-                    dtype=src.dtype,
-                    inputs=(src, where),
-                )
-        else:
-            if dtype is not None and dtype != dst.dtype:
-                raise TypeError(
-                    "Output array type does not match requested dtype"
-                )
-            if dst.shape != out_shape:
-                raise TypeError(
-                    "Output array shape "
-                    + str(dst.shape)
-                    + " does not match expected shape "
-                    + str(out_shape)
-                )
-        # Quick exit
-        if where is False:
-            return dst
-        if check_types and src.dtype != dst.dtype:
-            out_dtype = cls.find_common_type(src, dst)
-            if src.dtype != out_dtype:
-                temp = ndarray(
-                    src.shape,
-                    dtype=out_dtype,
-                    inputs=(src, where),
-                )
-                temp._thunk.convert(src._thunk)
-                src = temp
-            if dst.dtype != out_dtype:
-                temp = ndarray(
-                    dst.shape,
-                    dtype=out_dtype,
-                    inputs=(src, where),
-                )
+        axes = axis
+        if axes is None:
+            axes = tuple(range(src.ndim))
+        elif not isinstance(axes, tuple):
+            axes = (axes,)
 
-                temp._thunk.unary_reduction(
-                    op,
-                    src._thunk,
-                    cls._get_where_thunk(where, dst.shape),
-                    axes,
-                    keepdims,
-                    args,
-                    initial,
-                )
-                dst._thunk.convert(temp._thunk)
-            else:
-                dst._thunk.unary_reduction(
-                    op,
-                    src._thunk,
-                    cls._get_where_thunk(where, dst.shape),
-                    axes,
-                    keepdims,
-                    args,
-                    initial,
-                )
+        if any(type(ax) != int for ax in axes):
+            raise TypeError(
+                "'axis' must be an integer or a tuple of integers, "
+                f"but got {axis}"
+            )
+
+        axes = tuple(ax + src.ndim if ax < 0 else ax for ax in axes)
+
+        if any(ax < 0 for ax in axes):
+            raise ValueError(f"Invalid 'axis' value {axis}")
+
+        out_shape = ()
+        for dim in range(src.ndim):
+            if dim not in axes:
+                out_shape += (src.shape[dim],)
+            elif keepdims:
+                out_shape += (1,)
+
+        if out is None:
+            out = ndarray(
+                shape=out_shape, dtype=res_dtype, inputs=(src, where)
+            )
+        elif out.shape != out_shape:
+            raise ValueError(
+                f"the output shape mismatch: expected {out_shape} but got "
+                f"{out.shape}"
+            )
+
+        if dtype != src.dtype:
+            src = src.astype(dtype)
+
+        if out.dtype == res_dtype:
+            result = out
         else:
-            dst._thunk.unary_reduction(
+            result = ndarray(
+                shape=out_shape, dtype=res_dtype, inputs=(src, where)
+            )
+
+        if where:
+            result._thunk.unary_reduction(
                 op,
                 src._thunk,
-                cls._get_where_thunk(where, dst.shape),
+                cls._get_where_thunk(where, result.shape),
+                axis,
                 axes,
                 keepdims,
                 args,
                 initial,
             )
-        return dst
+
+        if result is not out:
+            out._thunk.convert(result._thunk)
+
+        return out
 
     @classmethod
     def _perform_binary_reduction(
@@ -3268,7 +3663,7 @@ class ndarray:
         # Collapsing down to a single value in this case
         # Check to see if we need to broadcast between inputs
         if one.shape != two.shape:
-            broadcast = broadcast_shapes(one.shape, two.shape)
+            broadcast = np.broadcast_shapes(one.shape, two.shape)
         else:
             broadcast = None
 
@@ -3297,7 +3692,7 @@ class ndarray:
         two = two._maybe_convert(common_type, args)._thunk
 
         # Compute the output shape
-        out_shape = broadcast_shapes(mask.shape, one.shape, two.shape)
+        out_shape = np.broadcast_shapes(mask.shape, one.shape, two.shape)
         out = ndarray(shape=out_shape, dtype=common_type, inputs=args)
         out._thunk.where(mask, one, two)
         return out
