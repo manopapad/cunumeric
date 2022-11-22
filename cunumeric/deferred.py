@@ -3166,6 +3166,7 @@ class DeferredArray(NumPyThunk):
 
             task.add_alignment(lhs, rhs1)
             task.add_alignment(lhs, rhs2)
+            task.add_broadcast(lhs)
 
             task.execute()
 
